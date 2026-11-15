@@ -1,0 +1,53 @@
+# name: test/sql/azure_directory_exists_page_size.test
+# description: Directory existence checks list at most one blob
+# group: [sql]
+
+require azure
+
+require parquet
+
+require-env AZ_TEMP_DIR
+
+require-env AZURE_STORAGE_CONNECTION_STRING
+
+statement ok
+CREATE SECRET s1 (
+    TYPE azure,
+    CONNECTION_STRING '{AZURE_STORAGE_CONNECTION_STRING}'
+);
+
+# Fill the target directory, so an unbounded listing would return many names
+statement ok
+COPY (SELECT range AS id, range % 4 AS part, range AS v FROM range(40))
+TO 'az://{AZ_TEMP_DIR}/dir-exists-page-size' (
+	FORMAT 'parquet',
+	PARTITION_BY (part, id),
+	OVERWRITE_OR_IGNORE true
+);
+
+statement ok
+CALL enable_logging('HTTP');
+
+# A partitioned append into the existing directory checks the target and partition directories
+statement ok
+COPY (SELECT 1000 AS id, 1 AS part)
+TO 'az://{AZ_TEMP_DIR}/dir-exists-page-size' (
+	FORMAT 'parquet',
+	PARTITION_BY (part),
+	OVERWRITE_OR_IGNORE true
+);
+
+query I
+SELECT count(*) > 0
+FROM duckdb_logs_parsed('HTTP')
+WHERE contains(request.url, 'comp=list');
+----
+true
+
+# Every listing of the append asks for a single name
+query I
+SELECT count(*)
+FROM duckdb_logs_parsed('HTTP')
+WHERE contains(request.url, 'comp=list') AND NOT contains(request.url, 'maxresults=1');
+----
+0
